@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>TIFF & AOI Viewer</title>
+    <title>TIFF & SAM Viewer</title>
     
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -15,17 +15,24 @@
 
     <style>
         body { font-family: Arial, sans-serif; margin: 20px; }
-        #map { height: 600px; width: 100%; border: 2px solid #ccc; border-radius: 8px; margin-top: 15px; }
+        #map { height: 600px; width: 100%; border: 2px solid #ccc; border-radius: 8px; margin-top: 15px; position: relative; }
         .controls { display: flex; gap: 10px; margin-bottom: 15px; }
         input { padding: 8px; width: 300px; font-size: 16px; }
         button { padding: 8px 16px; font-size: 16px; cursor: pointer; background: #007bff; color: white; border: none; border-radius: 4px; }
         button:hover { background: #0056b3; }
         .status-box { margin-top: 10px; padding: 10px; background: #f4f4f4; border-radius: 4px; font-family: monospace; display: none;}
+        
+        /* Legend Styling */
+        .legend {
+            background: white; padding: 10px; border-radius: 5px; box-shadow: 0 0 15px rgba(0,0,0,0.2);
+            line-height: 1.5em; color: #333;
+        }
+        .legend i { width: 18px; height: 18px; float: left; margin-right: 8px; opacity: 0.8; border: 1px solid #999; }
     </style>
 </head>
 <body>
 
-    <h2>🗺️ Native TIFF & AOI Drawer</h2>
+    <h2>🗺️ SAM Image Segmentation Viewer</h2>
     
     <div class="controls">
         <input type="text" id="imageIdInput" placeholder="Enter image_id (e.g., img_a1b2c3d4e5)">
@@ -42,24 +49,40 @@
 
         var currentTiffLayer = null;
         var currentImageId = null;
+        var maskLayers = [];
+        var pollInterval = null;
+
+        // Mask Colors Definition
+        const classColors = {
+            "building": "#ff0000",   // Red
+            "road": "#0000ff",       // Blue
+            "vegetation": "#00ff00"  // Green
+        };
+
+        // Create and add the Legend
+        var legend = L.control({position: 'bottomright'});
+        legend.onAdd = function (map) {
+            var div = L.DomUtil.create('div', 'legend');
+            div.innerHTML += '<h4>Detected Classes</h4>';
+            for (let cls in classColors) {
+                div.innerHTML += `<i style="background: ${classColors[cls]}"></i> ${cls.charAt(0).toUpperCase() + cls.slice(1)}<br>`;
+            }
+            return div;
+        };
+        legend.addTo(map);
 
         // 2. Initialize AOI Drawing Tools
         var drawnItems = new L.FeatureGroup();
         map.addLayer(drawnItems);
         var drawControl = new L.Control.Draw({
             draw: {
-                polygon: true,
-                rectangle: true,
-                polyline: false,
-                circle: false,
-                circlemarker: false,
-                marker: false
+                polygon: true, rectangle: true, polyline: false, circle: false, circlemarker: false, marker: false
             },
             edit: { featureGroup: drawnItems }
         });
         map.addControl(drawControl);
 
-        // 3. Handle loading the TIFF
+        // 3. Handle loading the Base TIFF
         async function loadMap() {
             const imageId = document.getElementById('imageIdInput').value;
             if (!imageId) return alert("Please enter an image_id!");
@@ -67,59 +90,46 @@
 
             try {
                 showStatus("Fetching file URL from API...");
-                
-                // Get the raw file URL from your Flask API
                 const response = await fetch(`http://127.0.0.1:5000/api/v1/images/${imageId}/visualization`);
                 const data = await response.json();
                 
                 if (data.error) return alert("Error: " + data.error);
 
-                showStatus("Downloading TIFF to browser memory...");
-
-                // Download the raw TIFF bytes
+                showStatus("Downloading and parsing TIFF...");
                 const tiffResponse = await fetch(data.file_url);
                 const arrayBuffer = await tiffResponse.arrayBuffer();
-
-                showStatus("Parsing TIFF and rendering map...");
-
-                // Parse using Georaster
                 const georaster = await parseGeoraster(arrayBuffer);
 
                 if (currentTiffLayer) map.removeLayer(currentTiffLayer);
                 
-                // Create the Leaflet layer
                 currentTiffLayer = new GeoRasterLayer({
                     georaster: georaster,
                     opacity: 0.8,
-                    resolution: 256 // Adjust based on performance vs quality needs
+                    resolution: 256
                 });
 
                 currentTiffLayer.addTo(map);
                 map.fitBounds(currentTiffLayer.getBounds());
                 
-                showStatus("TIFF Loaded! Use the toolbar on the left to draw your AOI.");
+                showStatus("TIFF Loaded! Draw an AOI to run segmentation.");
 
             } catch (error) {
                 console.error(error);
-                alert("Failed to load map. Check console for details.");
+                alert("Failed to load map.");
             }
         }
 
-        // 4. Handle when the user finishes drawing an AOI
+        // 4. Handle AOI drawing and trigger SAM
         map.on(L.Draw.Event.CREATED, async function (e) {
             if (!currentImageId) return alert("Please load a TIFF first!");
 
-            var layer = e.layer;
-            drawnItems.clearLayers(); // Remove previous drawings
-            drawnItems.addLayer(layer);
+            drawnItems.clearLayers(); 
+            drawnItems.addLayer(e.layer);
+            var aoiGeoJSON = e.layer.toGeoJSON();
             
-            // Extract the GeoJSON payload
-            var aoiGeoJSON = layer.toGeoJSON();
-            
-            showStatus("Sending AOI to SAM model...");
+            showStatus("Sending AOI to Backend...");
 
             try {
-                // Post the AOI to your segment endpoint
                 const response = await fetch(`http://127.0.0.1:5000/api/v1/images/${currentImageId}/segment`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -127,13 +137,62 @@
                 });
                 
                 const data = await response.json();
-                showStatus(`SAM Task Queued! Task ID: ${data.task_id} (Status: ${data.status})`);
+                pollStatus(data.task_id); // Start polling immediately!
                 
             } catch (error) {
                 console.error(error);
                 showStatus("Failed to send AOI to backend.");
             }
         });
+
+        // 5. Polling Logic for live background task updates
+        function pollStatus(taskId) {
+            if (pollInterval) clearInterval(pollInterval);
+            
+            pollInterval = setInterval(async () => {
+                const res = await fetch(`http://127.0.0.1:5000/api/v1/tasks/${taskId}/status`);
+                const data = await res.json();
+                
+                showStatus(`⏳ Status: ${data.message}`);
+
+                if (data.status === 'finished') {
+                    clearInterval(pollInterval);
+                    showStatus("✅ Processing Complete! Rendering masks...");
+                    renderMasks(data.result.masks);
+                } else if (data.status === 'failed') {
+                    clearInterval(pollInterval);
+                    showStatus(`❌ Task Failed: ${data.message}. Check terminal.`);
+                }
+            }, 2000); 
+        }
+
+        // 6. Render the final output masks over the map
+        async function renderMasks(masksDict) {
+            maskLayers.forEach(layer => map.removeLayer(layer));
+            maskLayers = [];
+
+            for (const [prompt, url] of Object.entries(masksDict)) {
+                try {
+                    const response = await fetch(url);
+                    const arrayBuffer = await response.arrayBuffer();
+                    const georaster = await parseGeoraster(arrayBuffer);
+
+                    const hexColor = classColors[prompt] || "#ffffff";
+
+                    const layer = new GeoRasterLayer({
+                        georaster: georaster,
+                        opacity: 0.6,
+                        resolution: 256,
+                        pixelValuesToColorFn: values => values[0] > 0 ? hexColor : null
+                    });
+
+                    layer.addTo(map);
+                    maskLayers.push(layer);
+                } catch(e) {
+                    console.error(`Failed to load mask for ${prompt}`, e);
+                }
+            }
+        }
 
         function showStatus(msg) {
             const box = document.getElementById('statusBox');

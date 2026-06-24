@@ -1,16 +1,13 @@
-# Environments
-venv/
-env/
-.env
-
-# Python Cache
-__pycache__/
-*.pyc
-
-# Uploads and heavy images
+# Ignore uploaded/generated GIS files
 uploads/
+outputs/
 *.tif
 *.tiff
 
-# Database
-*.db
+# Ignore our new local Celery/Flask databases
+*.sqlite
+instance/
+
+# Ignore Python caches
+__pycache__/
+venv/

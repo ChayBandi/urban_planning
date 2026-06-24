@@ -2,6 +2,7 @@ from flask import Blueprint, request, jsonify, render_template, send_from_direct
 from werkzeug.utils import secure_filename
 import os
 import uuid
+import threading
 from .models import db, ImageTask
 from .tasks import validate_tiff_task, run_sam_segmentation
 
@@ -35,7 +36,10 @@ def upload_image():
         
     image_id = f"img_{uuid.uuid4().hex[:10]}"
     filename = secure_filename(file.filename)
-    filepath = os.path.join('uploads', f"{image_id}_{filename}")
+    
+    uploads_dir = os.path.abspath('uploads')
+    os.makedirs(uploads_dir, exist_ok=True)
+    filepath = os.path.join(uploads_dir, f"{image_id}_{filename}")
     
     file.save(filepath)
     
@@ -43,63 +47,71 @@ def upload_image():
     db.session.add(new_task)
     db.session.commit()
     
-    celery_task = validate_tiff_task.apply_async(args=[image_id, filepath], task_id=new_task.task_id)
+    # NEW: Run in a pure Python background thread!
+    app_context = current_app._get_current_object()
+    thread = threading.Thread(target=validate_tiff_task, args=(app_context, new_task.task_id, image_id, filepath))
+    thread.start()
 
     return jsonify({
         "image_id": image_id,
-        "task_id": celery_task.id,
+        "task_id": new_task.task_id,
         "status": "uploading"
     }), 202
 
 @api_bp.route('/tasks/<task_id>/status', methods=['GET'])
 def get_status(task_id):
+    """Polls the SQLite database for the status."""
     task_record = ImageTask.query.get_or_404(task_id)
-    celery_task = validate_tiff_task.AsyncResult(task_id)
     
-    if celery_task.state == 'PENDING':
-        response = {"status": task_record.status, "message": task_record.message}
-    elif celery_task.state != 'FAILURE':
-        response = {
-            "status": celery_task.info.get('status', 'processing'),
-            "progress": celery_task.info.get('progress', 0),
-            "message": celery_task.info.get('message', '')
-        }
-    else:
-        response = {"status": "failed", "message": str(celery_task.info)}
+    response = {
+        "status": task_record.status,
+        "message": task_record.message
+    }
+    
+    # If the thread marked it as finished, dynamically assemble the mask URLs
+    if task_record.status == 'finished':
+        prompts = ["building", "road", "vegetation"]
+        masks = {}
+        outputs_dir = os.path.abspath('outputs')
+        
+        for prompt in prompts:
+            expected_filename = f"mask_{task_record.image_id}_{prompt}.tif"
+            if os.path.exists(os.path.join(outputs_dir, expected_filename)):
+                masks[prompt] = f"http://127.0.0.1:5000/api/v1/outputs/{expected_filename}"
+                
+        response["result"] = {"masks": masks}
         
     return jsonify(response), 200
 
-# --- THE SIMPLIFIED FILE SERVING ROUTES ---
+# --- THE FILE SERVING ROUTES ---
 
 @api_bp.route('/uploads/<filename>', methods=['GET'])
 def serve_uploaded_file(filename):
-    """Serves the raw TIFF file to the frontend."""
-    # Force absolute path to avoid directory confusion
     uploads_dir = os.path.abspath('uploads')
     return send_from_directory(uploads_dir, filename)
 
+@api_bp.route('/outputs/<filename>', methods=['GET'])
+def serve_output_file(filename):
+    outputs_dir = os.path.abspath('outputs')
+    return send_from_directory(outputs_dir, filename)
+
 @api_bp.route('/images/<image_id>/visualization', methods=['GET'])
 def get_visualization(image_id):
-    """Returns the direct download URL for the frontend georaster plugin."""
-    # Force absolute path to match the upload route
     uploads_dir = os.path.abspath('uploads')
     actual_filename = None
     
     if os.path.exists(uploads_dir):
         for f in os.listdir(uploads_dir):
-            if f.startswith(image_id.strip()): # .strip() removes accidental spaces
+            if f.startswith(image_id.strip()): 
                 actual_filename = f
                 break
 
     if not actual_filename:
-        # This will now tell you EXACTLY which folder it checked
-        return jsonify({"error": f"Image file for {image_id} not found. Looked inside: {uploads_dir}"}), 404
-
-    file_url = f"http://127.0.0.1:5000/api/v1/uploads/{actual_filename}"
+        return jsonify({"error": f"Image file for {image_id} not found."}), 404
 
     return jsonify({
         "image_id": image_id,
-        "file_url": file_url
+        "file_url": f"http://127.0.0.1:5000/api/v1/uploads/{actual_filename}"
     }), 200
 
 @api_bp.route('/images/<image_id>/segment', methods=['POST'])
@@ -114,10 +126,13 @@ def trigger_segmentation(image_id):
     db.session.add(new_task)
     db.session.commit()
     
-    celery_task = run_sam_segmentation.apply_async(args=[image_id, aoi], task_id=new_task.task_id)
+    # NEW: Run in a pure Python background thread!
+    app_context = current_app._get_current_object()
+    thread = threading.Thread(target=run_sam_segmentation, args=(app_context, new_task.task_id, image_id, aoi))
+    thread.start()
     
     return jsonify({
-        "task_id": celery_task.id,
+        "task_id": new_task.task_id,
         "status": "segmenting",
         "message": "AOI validated. SAM processing initiated."
     }), 202
