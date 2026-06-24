@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>TIFF & AOI Viewer</title>
+    
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.css"/>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.js"></script>
+
+    <script src="https://unpkg.com/georaster"></script>
+    <script src="https://unpkg.com/georaster-layer-for-leaflet"></script>
+
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        #map { height: 600px; width: 100%; border: 2px solid #ccc; border-radius: 8px; margin-top: 15px; }
+        .controls { display: flex; gap: 10px; margin-bottom: 15px; }
+        input { padding: 8px; width: 300px; font-size: 16px; }
+        button { padding: 8px 16px; font-size: 16px; cursor: pointer; background: #007bff; color: white; border: none; border-radius: 4px; }
+        button:hover { background: #0056b3; }
+        .status-box { margin-top: 10px; padding: 10px; background: #f4f4f4; border-radius: 4px; font-family: monospace; display: none;}
+    </style>
+</head>
+<body>
+
+    <h2>🗺️ Native TIFF & AOI Drawer</h2>
+    
+    <div class="controls">
+        <input type="text" id="imageIdInput" placeholder="Enter image_id (e.g., img_a1b2c3d4e5)">
+        <button onclick="loadMap()">1. Load TIFF</button>
+    </div>
+
+    <div id="statusBox" class="status-box"></div>
+    <div id="map"></div>
+
+    <script>
+        // 1. Initialize Map
+        var map = L.map('map').setView([20.0, 0.0], 2);
+        L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
+
+        var currentTiffLayer = null;
+        var currentImageId = null;
+
+        // 2. Initialize AOI Drawing Tools
+        var drawnItems = new L.FeatureGroup();
+        map.addLayer(drawnItems);
+        var drawControl = new L.Control.Draw({
+            draw: {
+                polygon: true,
+                rectangle: true,
+                polyline: false,
+                circle: false,
+                circlemarker: false,
+                marker: false
+            },
+            edit: { featureGroup: drawnItems }
+        });
+        map.addControl(drawControl);
+
+        // 3. Handle loading the TIFF
+        async function loadMap() {
+            const imageId = document.getElementById('imageIdInput').value;
+            if (!imageId) return alert("Please enter an image_id!");
+            currentImageId = imageId;
+
+            try {
+                showStatus("Fetching file URL from API...");
+                
+                // Get the raw file URL from your Flask API
+                const response = await fetch(`http://127.0.0.1:5000/api/v1/images/${imageId}/visualization`);
+                const data = await response.json();
+                
+                if (data.error) return alert("Error: " + data.error);
+
+                showStatus("Downloading TIFF to browser memory...");
+
+                // Download the raw TIFF bytes
+                const tiffResponse = await fetch(data.file_url);
+                const arrayBuffer = await tiffResponse.arrayBuffer();
+
+                showStatus("Parsing TIFF and rendering map...");
+
+                // Parse using Georaster
+                const georaster = await parseGeoraster(arrayBuffer);
+
+                if (currentTiffLayer) map.removeLayer(currentTiffLayer);
+                
+                // Create the Leaflet layer
+                currentTiffLayer = new GeoRasterLayer({
+                    georaster: georaster,
+                    opacity: 0.8,
+                    resolution: 256 // Adjust based on performance vs quality needs
+                });
+
+                currentTiffLayer.addTo(map);
+                map.fitBounds(currentTiffLayer.getBounds());
+                
+                showStatus("TIFF Loaded! Use the toolbar on the left to draw your AOI.");
+
+            } catch (error) {
+                console.error(error);
+                alert("Failed to load map. Check console for details.");
+            }
+        }
+
+        // 4. Handle when the user finishes drawing an AOI
+        map.on(L.Draw.Event.CREATED, async function (e) {
+            if (!currentImageId) return alert("Please load a TIFF first!");
+
+            var layer = e.layer;
+            drawnItems.clearLayers(); // Remove previous drawings
+            drawnItems.addLayer(layer);
+            
+            // Extract the GeoJSON payload
+            var aoiGeoJSON = layer.toGeoJSON();
+            
+            showStatus("Sending AOI to SAM model...");
+
+            try {
+                // Post the AOI to your segment endpoint
+                const response = await fetch(`http://127.0.0.1:5000/api/v1/images/${currentImageId}/segment`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ aoi: aoiGeoJSON })
+                });
+                
+                const data = await response.json();
+                showStatus(`SAM Task Queued! Task ID: ${data.task_id} (Status: ${data.status})`);
+                
+            } catch (error) {
+                console.error(error);
+                showStatus("Failed to send AOI to backend.");
+            }
+        });
+
+        function showStatus(msg) {
+            const box = document.getElementById('statusBox');
+            box.style.display = 'block';
+            box.innerText = msg;
+        }
+    </script>
+</body>
+</html>
