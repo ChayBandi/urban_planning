@@ -2,100 +2,99 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>TIFF & SAM Viewer</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SAM3 Geospatial Viewer</title>
     
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.css"/>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.js"></script>
-
-    <script src="https://unpkg.com/georaster"></script>
-    <script src="https://unpkg.com/georaster-layer-for-leaflet"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.css" />
 
     <style>
-        body { font-family: Arial, sans-serif; margin: 20px; }
-        #map { height: 600px; width: 100%; border: 2px solid #ccc; border-radius: 8px; margin-top: 15px; position: relative; }
-        .controls { display: flex; gap: 10px; margin-bottom: 15px; }
-        input { padding: 8px; width: 300px; font-size: 16px; }
-        button { padding: 8px 16px; font-size: 16px; cursor: pointer; background: #007bff; color: white; border: none; border-radius: 4px; }
+        body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background-color: #f4f4f4; }
+        #map { height: 75vh; width: 100%; margin-top: 15px; border-radius: 8px; border: 2px solid #ccc; }
+        .controls { background: white; padding: 15px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); margin-bottom: 15px; }
+        button { padding: 8px 15px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; }
         button:hover { background: #0056b3; }
-        .status-box { margin-top: 10px; padding: 10px; background: #f4f4f4; border-radius: 4px; font-family: monospace; display: none;}
-        
-        /* Legend Styling */
-        .legend {
-            background: white; padding: 10px; border-radius: 5px; box-shadow: 0 0 15px rgba(0,0,0,0.2);
-            line-height: 1.5em; color: #333;
-        }
-        .legend i { width: 18px; height: 18px; float: left; margin-right: 8px; opacity: 0.8; border: 1px solid #999; }
+        input[type="text"] { padding: 8px; width: 300px; margin-right: 10px; border: 1px solid #ccc; border-radius: 4px; }
+        #status-bar { padding: 10px; background: #e9ecef; border-radius: 4px; font-weight: bold; margin-bottom: 10px; }
     </style>
 </head>
 <body>
 
-    <h2>🗺️ SAM Image Segmentation Viewer</h2>
-    
+    <h2>Geospatial Segmentation Viewer</h2>
+
     <div class="controls">
-        <input type="text" id="imageIdInput" placeholder="Enter image_id (e.g., img_a1b2c3d4e5)">
-        <button onclick="loadMap()">1. Load TIFF</button>
+        <input type="text" id="imageIdInput" placeholder="Paste image_id from endpoint here...">
+        <button onclick="loadMap()">Load Map</button>
     </div>
 
-    <div id="statusBox" class="status-box"></div>
+    <div id="status-bar">System Ready. Paste an Image ID to begin.</div>
+
     <div id="map"></div>
 
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.js"></script>
+    <script src="https://unpkg.com/georaster"></script>
+    <script src="https://unpkg.com/georaster-layer-for-leaflet"></script>
+
     <script>
-        // 1. Initialize Map
-        var map = L.map('map').setView([20.0, 0.0], 2);
-        L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
+        let map;
+        let drawnItems;
+        let currentTiffLayer = null;
+        let currentImageId = null;
+        
+        // NEW: Variables for toggling vector masks
+        let maskLayers = {};  
+        let layerControl = null; 
 
-        var currentTiffLayer = null;
-        var currentImageId = null;
-        var maskLayers = [];
-        var pollInterval = null;
+        function showStatus(msg) {
+            document.getElementById('status-bar').innerText = msg;
+        }
 
-        // Mask Colors Definition
-        const classColors = {
-            "building": "#ff0000",   // Red
-            "road": "#0000ff",       // Blue
-            "vegetation": "#00ff00"  // Green
-        };
+        // Initialize Map
+        function initMap() {
+            map = L.map('map').setView([23.0225, 72.5714], 10);
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                maxZoom: 19
+            }).addTo(map);
 
-        // Create and add the Legend
-        var legend = L.control({position: 'bottomright'});
-        legend.onAdd = function (map) {
-            var div = L.DomUtil.create('div', 'legend');
-            div.innerHTML += '<h4>Detected Classes</h4>';
-            for (let cls in classColors) {
-                div.innerHTML += `<i style="background: ${classColors[cls]}"></i> ${cls.charAt(0).toUpperCase() + cls.slice(1)}<br>`;
-            }
-            return div;
-        };
-        legend.addTo(map);
+            drawnItems = new L.FeatureGroup();
+            map.addLayer(drawnItems);
 
-        // 2. Initialize AOI Drawing Tools
-        var drawnItems = new L.FeatureGroup();
-        map.addLayer(drawnItems);
-        var drawControl = new L.Control.Draw({
-            draw: {
-                polygon: true, rectangle: true, polyline: false, circle: false, circlemarker: false, marker: false
-            },
-            edit: { featureGroup: drawnItems }
-        });
-        map.addControl(drawControl);
+            const drawControl = new L.Control.Draw({
+                edit: { featureGroup: drawnItems },
+                draw: {
+                    polygon: true,
+                    rectangle: true,
+                    circle: false,
+                    polyline: false,
+                    marker: false,
+                    circlemarker: false
+                }
+            });
+            map.addControl(drawControl);
 
-        // 3. Handle loading the Base TIFF
+            map.on(L.Draw.Event.CREATED, function (event) {
+                drawnItems.clearLayers(); 
+                const layer = event.layer;
+                drawnItems.addLayer(layer);
+                triggerSegmentation(layer.toGeoJSON());
+            });
+        }
+
+        // Fetch TIFF and render via GeoRaster
         async function loadMap() {
-            const imageId = document.getElementById('imageIdInput').value;
-            if (!imageId) return alert("Please enter an image_id!");
-            currentImageId = imageId;
+            const id = document.getElementById('imageIdInput').value;
+            if (!id) return alert("Please enter an image_id!");
+            
+            currentImageId = id;
 
             try {
-                showStatus("Fetching file URL from API...");
-                const response = await fetch(`http://127.0.0.1:5000/api/v1/images/${imageId}/visualization`);
+                showStatus("Downloading and parsing TIFF...");
+                const response = await fetch(`http://127.0.0.1:5000/api/v1/images/${currentImageId}/visualization`);
                 const data = await response.json();
                 
                 if (data.error) return alert("Error: " + data.error);
 
-                showStatus("Downloading and parsing TIFF...");
                 const tiffResponse = await fetch(data.file_url);
                 const arrayBuffer = await tiffResponse.arrayBuffer();
                 const georaster = await parseGeoraster(arrayBuffer);
@@ -111,94 +110,113 @@
                 currentTiffLayer.addTo(map);
                 map.fitBounds(currentTiffLayer.getBounds());
                 
-                showStatus("TIFF Loaded! Draw an AOI to run segmentation.");
+                showStatus("TIFF Loaded! Draw an AOI polygon to run segmentation.");
 
             } catch (error) {
                 console.error(error);
-                alert("Failed to load map.");
+                showStatus("Failed to load map visualization.");
             }
         }
 
-        // 4. Handle AOI drawing and trigger SAM
-        map.on(L.Draw.Event.CREATED, async function (e) {
-            if (!currentImageId) return alert("Please load a TIFF first!");
+        // Trigger API Segmentation
+        async function triggerSegmentation(aoiGeoJSON) {
+            if (!currentImageId) return alert("Please load an image first.");
 
-            drawnItems.clearLayers(); 
-            drawnItems.addLayer(e.layer);
-            var aoiGeoJSON = e.layer.toGeoJSON();
+            showStatus("Submitting AOI to background SAM3 process...");
             
-            showStatus("Sending AOI to Backend...");
-
             try {
                 const response = await fetch(`http://127.0.0.1:5000/api/v1/images/${currentImageId}/segment`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ aoi: aoiGeoJSON })
                 });
-                
+
                 const data = await response.json();
-                pollStatus(data.task_id); // Start polling immediately!
-                
+                if (data.error) return alert("Error: " + data.error);
+
+                showStatus("Segmentation started. Task ID: " + data.task_id);
+                pollStatus(data.task_id);
             } catch (error) {
                 console.error(error);
-                showStatus("Failed to send AOI to backend.");
+                showStatus("Failed to trigger segmentation.");
             }
-        });
-
-        // 5. Polling Logic for live background task updates
-        function pollStatus(taskId) {
-            if (pollInterval) clearInterval(pollInterval);
-            
-            pollInterval = setInterval(async () => {
-                const res = await fetch(`http://127.0.0.1:5000/api/v1/tasks/${taskId}/status`);
-                const data = await res.json();
-                
-                showStatus(`⏳ Status: ${data.message}`);
-
-                if (data.status === 'finished') {
-                    clearInterval(pollInterval);
-                    showStatus("✅ Processing Complete! Rendering masks...");
-                    renderMasks(data.result.masks);
-                } else if (data.status === 'failed') {
-                    clearInterval(pollInterval);
-                    showStatus(`❌ Task Failed: ${data.message}. Check terminal.`);
-                }
-            }, 2000); 
         }
 
-        // 6. Render the final output masks over the map
-        async function renderMasks(masksDict) {
-            maskLayers.forEach(layer => map.removeLayer(layer));
-            maskLayers = [];
-
-            for (const [prompt, url] of Object.entries(masksDict)) {
+        // Poll for background status
+        async function pollStatus(taskId) {
+            const interval = setInterval(async () => {
                 try {
+                    const response = await fetch(`http://127.0.0.1:5000/api/v1/tasks/${taskId}/status`);
+                    const data = await response.json();
+
+                    if (data.status === 'failed') {
+                        clearInterval(interval);
+                        showStatus("Processing failed: " + data.message);
+                    } else if (data.status === 'finished') {
+                        clearInterval(interval);
+                        showStatus("Segmentation complete! Rendering vector masks...");
+                        renderMasks(data.result.masks);
+                    } else {
+                        showStatus("Processing... " + data.message);
+                    }
+                } catch (error) {
+                    console.error("Polling error:", error);
+                }
+            }, 3000); 
+        }
+
+        // Render GeoJSON vectors & create layer controls
+        async function renderMasks(masksObj) {
+            if (layerControl) {
+                map.removeControl(layerControl);
+            }
+
+            Object.values(maskLayers).forEach(layer => map.removeLayer(layer));
+            maskLayers = {}; 
+
+            const colorMap = {
+                "building": "#ff0000",
+                "road": "#0000ff",
+                "vegetation": "#00ff00"
+            };
+
+            for (const [prompt, url] of Object.entries(masksObj)) {
+                try {
+                    const hexColor = colorMap[prompt] || "#ffffff";
+                    
                     const response = await fetch(url);
-                    const arrayBuffer = await response.arrayBuffer();
-                    const georaster = await parseGeoraster(arrayBuffer);
+                    const geojsonData = await response.json();
 
-                    const hexColor = classColors[prompt] || "#ffffff";
-
-                    const layer = new GeoRasterLayer({
-                        georaster: georaster,
-                        opacity: 0.6,
-                        resolution: 256,
-                        pixelValuesToColorFn: values => values[0] > 0 ? hexColor : null
+                    const layer = L.geoJSON(geojsonData, {
+                        style: function (feature) {
+                            return {
+                                color: hexColor,
+                                weight: 2,
+                                fillColor: hexColor,
+                                fillOpacity: 0.4
+                            };
+                        }
                     });
 
                     layer.addTo(map);
-                    maskLayers.push(layer);
-                } catch(e) {
-                    console.error(`Failed to load mask for ${prompt}`, e);
+
+                    const layerLabel = prompt.charAt(0).toUpperCase() + prompt.slice(1);
+                    maskLayers[layerLabel] = layer;
+                    
+                } catch (error) {
+                    console.error(`Failed to load ${prompt} vector mask:`, error);
                 }
+            }
+
+            if (Object.keys(maskLayers).length > 0) {
+                layerControl = L.control.layers(null, maskLayers, {
+                    collapsed: false 
+                }).addTo(map);
+                showStatus("Vector masks rendered! Use the control box in the top right to toggle layers.");
             }
         }
 
-        function showStatus(msg) {
-            const box = document.getElementById('statusBox');
-            box.style.display = 'block';
-            box.innerText = msg;
-        }
+        window.onload = initMap;
     </script>
 </body>
 </html>

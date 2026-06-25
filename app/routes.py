@@ -60,22 +60,17 @@ def upload_image():
 
 @api_bp.route('/tasks/<task_id>/status', methods=['GET'])
 def get_status(task_id):
-    """Polls the SQLite database for the status."""
     task_record = ImageTask.query.get_or_404(task_id)
+    response = {"status": task_record.status, "message": task_record.message}
     
-    response = {
-        "status": task_record.status,
-        "message": task_record.message
-    }
-    
-    # If the thread marked it as finished, dynamically assemble the mask URLs
     if task_record.status == 'finished':
         prompts = ["building", "road", "vegetation"]
         masks = {}
         outputs_dir = os.path.abspath('outputs')
         
         for prompt in prompts:
-            expected_filename = f"mask_{task_record.image_id}_{prompt}.tif"
+            # LOOKING FOR GEOJSON NOW!
+            expected_filename = f"mask_{task_record.image_id}_{prompt}.geojson"
             if os.path.exists(os.path.join(outputs_dir, expected_filename)):
                 masks[prompt] = f"http://127.0.0.1:5000/api/v1/outputs/{expected_filename}"
                 
